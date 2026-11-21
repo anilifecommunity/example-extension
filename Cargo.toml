@@ -1,5 +1,5 @@
 [package]
-name = ""
+name = "animesalt-provider-rust"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,10 +7,11 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.41"
+wit-bindgen = "0.63"
 serde_json = "1"
 
 [profile.release]
 opt-level = "s"
-lto = true
-strip = true
+lto = false
+strip = "none"
+codegen-units = 16
