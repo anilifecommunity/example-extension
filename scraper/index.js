@@ -1,150 +1,129 @@
+import { http, log, cacheGet, cacheSet } from 'anilili:provider/host@1.0.0';
 
-import * as cheerio from "cheerio";
-import { URL } from "node:url";
-import readline from "node:readline/promises";
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout
-});
-
-function getDomain(url) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return null;
-  }
-}
-
-function isValidUrl(value, base) {
-  try {
-    const url = new URL(value, base);
-    return ["http:", "https:"].includes(url.protocol)
-      ? url.href
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function getServiceName(host) {
-  const known = {
-    "vidstream": "Vidstream",
-    "streamtape": "Streamtape",
-    "filemoon": "Filemoon",
-    "dood": "DoodStream",
-    "mp4upload": "MP4Upload"
-  };
-
-  const match = Object.entries(known).find(
-    ([key]) => host.toLowerCase().includes(key)
-  );
-
-  return match?.[1] ?? "Unknown player host";
-}
-
-async function inspect(url) {
-  const parsed = new URL(url);
-
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error("Only HTTP and HTTPS URLs are supported");
-  }
-
-  console.log("\nFetching webpage:", url);
-
-  
-const response = await fetch(url, {
-  headers: {
-    "User-Agent": "AnimeInspector/1.0",
-    "Accept": "text/html"
-  },
-  signal: AbortSignal.timeout(15000)
-});
-
-console.log("Status:", response.status);
-console.log("Final URL:", response.url);
-console.log("Content-Type:", response.headers.get("content-type"));
-console.log("Server:", response.headers.get("server"));
-
-if (response.status === 403) {
-  const body = await response.text();
-
+export function info() {
   return {
-    error: "ACCESS_DENIED",
-    status: 403,
-    finalUrl: response.url,
-    server: response.headers.get("server"),
-    responsePreview: body.slice(0, 500),
-    message: "The website refused this request."
+    name: 'Latanime',
+    hosts: ['latanime.org', 'mp4upload.com', 'www.mp4upload.com'],
   };
 }
 
-if (!response.ok) {
-  throw new Error(`HTTP ${response.status}`);
+function bytesToString(bytes) {
+  return new TextDecoder().decode(new Uint8Array(bytes));
 }
 
-
-  const html = await response.text();
-  const $ = cheerio.load(html);
-
-  const embeds = new Map();
-
-  // Inspect publicly exposed player containers.
-  $("iframe[src], iframe[data-src], embed[src], object[data]")
-    .each((_, element) => {
-      const raw =
-        $(element).attr("src") ||
-        $(element).attr("data-src") ||
-        $(element).attr("data");
-
-      if (!raw) return;
-
-      const embedUrl = isValidUrl(raw, response.url);
-      if (!embedUrl) return;
-
-      const host = getDomain(embedUrl);
-      if (!host) return;
-
-      if (!embeds.has(host)) {
-        embeds.set(host, {
-          service: getServiceName(host),
-          domain: host,
-          embeds: []
-        });
-      }
-
-      embeds.get(host).embeds.push(embedUrl);
-    });
-
-  const result = {
-    page: url,
-    pageTitle: $("title").text().trim(),
-    hasVideoElement: $("video").length > 0,
-    playerHosts: [...embeds.values()]
-  };
-
-  return result;
+function stringToBytes(s) {
+  return Array.from(new TextEncoder().encode(s));
 }
 
-try {
-  const url = await rl.question("Anime episode URL: ");
+function findSlug(title, dub) {
+  const key = 'slug:' + title.toLowerCase() + ':' + dub;
+  const cached = cacheGet(key);
+  if (cached) return cached;
 
-  const result = await inspect(url);
+  const searchUrl = 'https://latanime.org/?s=' + encodeURIComponent(title);
+  const res = http({
+    method: 'GET',
+    url: searchUrl,
+    headers: [['Accept', 'text/html']],
+    body: undefined,
+  });
+  if (!res || res.status !== 200) return null;
 
-  console.log("\n========== RESULTS ==========\n");
-  console.log(JSON.stringify(result, null, 2));
+  const html = bytesToString(res.body);
+  const re = /latanime\.org\/anime\/([^"']+)/g;
+  const slugs = [];
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    slugs.push(m[1]);
+  }
+  if (slugs.length === 0) return null;
 
-  console.log("\n========== PLAYER HOSTS ==========\n");
-
-  for (const player of result.playerHosts) {
-    console.log("Service:", player.service);
-    console.log("Domain:", player.domain);
-    console.log("Embeds:", player.embeds.length);
-    console.log("-----------------------------");
+  let chosen = slugs[0];
+  if (dub) {
+    const latino = slugs.find(s => s.toLowerCase().includes('latino'));
+    if (latino) chosen = latino;
+  } else {
+    const cast = slugs.find(s => s.toLowerCase().includes('castellano') || s.toLowerCase().includes('japones') || s.toLowerCase().includes('sub'));
+    if (cast) chosen = cast;
   }
 
-} catch (error) {
-  console.error("Inspector error:", error.message);
-} finally {
-  rl.close();
+  cacheSet(key, chosen, 86400);
+  return chosen;
+}
+
+function findMp4UploadEmbed(html) {
+  const re = /data-player="([A-Za-z0-9+/=]+)"/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    try {
+      const url = atob(m[1]);
+      if (url.includes('mp4upload')) return url;
+    } catch (e) {}
+  }
+  return null;
+}
+
+export function servers(query) {
+  log('Latanime lookup: ' + JSON.stringify(query.titles) + ' ep=' + query.episode + ' dub=' + query.dub);
+
+  let slug = null;
+  for (const t of query.titles) {
+    slug = findSlug(t, query.dub);
+    if (slug) break;
+  }
+  if (!slug) {
+    throw new Error('Latanime: no matching series found');
+  }
+
+  const epUrl = 'https://latanime.org/ver/' + slug + '-episodio-' + query.episode;
+  log('Latanime episode url: ' + epUrl);
+
+  const epRes = http({
+    method: 'GET',
+    url: epUrl,
+    headers: [['Accept', 'text/html']],
+    body: undefined,
+  });
+  if (!epRes || epRes.status !== 200) {
+    throw new Error('Latanime: HTTP ' + (epRes ? epRes.status : 'none') + ' for episode page');
+  }
+  const epHtml = bytesToString(epRes.body);
+
+  const embedUrl = findMp4UploadEmbed(epHtml);
+  if (!embedUrl) {
+    throw new Error('Latanime: no mp4upload embed found');
+  }
+  log('Latanime embed: ' + embedUrl);
+
+  const embedRes = http({
+    method: 'GET',
+    url: embedUrl,
+    headers: [['Accept', 'text/html']],
+    body: undefined,
+  });
+  if (!embedRes || embedRes.status !== 200) {
+    throw new Error('Latanime: HTTP ' + (embedRes ? embedRes.status : 'none') + ' for embed');
+  }
+  const embedHtml = bytesToString(embedRes.body);
+
+  const mp4Match = embedHtml.match(/https?:\/\/[^\s"']*\.mp4/);
+  if (!mp4Match) {
+    throw new Error('Latanime: no mp4 found in embed');
+  }
+  const streamUrl = mp4Match[0];
+
+  return [
+    {
+      name: 'Latanime',
+      dub: query.dub,
+      headers: [['Referer', 'https://www.mp4upload.com/']],
+      streams: [
+        {
+          url: streamUrl,
+          quality: undefined,
+          format: 'mp4',
+        },
+      ],
+    },
+  ];
 }
