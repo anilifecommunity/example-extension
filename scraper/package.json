@@ -1,0 +1,12 @@
+
+{
+  "name": "anime-source-inspector",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2"
+  }
+}
