@@ -1,27 +1,9 @@
-import { http, log, cacheGet, cacheSet } from 'anilili:provider/host@1.0.0';
+import { http, log, cacheGet, cacheSet, browserFetch } from 'anilili:provider/host@1.0.0';
 
 export function info() {
   return {
-    name: 'AnimeOnline',
-    hosts: [
-      'ver2.animeonline.ninja',
-      'ww4.animeonline.ninja',
-      'saidochesto.top',
-      'gupload.site',
-      'uqload.vc',
-      'savefiles.top',
-      'mxdrop.to',
-      'streamtape.com',
-      'luluvid.com',
-      'hexload.com',
-      'filemoon0.top',
-      'mp4upload.com',
-      'streamp2p.top',
-      'upnshare.top',
-      'dood.la',
-      'vidara.to',
-      'vidsonic.net',
-    ],
+    name: 'JkAnime',
+    hosts: ['jkanime.net', 'nika.playmudos.com', 'cdn.jkdesa.com'],
   };
 }
 
@@ -29,46 +11,47 @@ function bytesToString(bytes) {
   return new TextDecoder().decode(new Uint8Array(bytes));
 }
 
+function stringToBytes(s) {
+  return Array.from(new TextEncoder().encode(s));
+}
+
+function cacheGetStr(key) {
+  const v = cacheGet(key);
+  return v === undefined || v === null ? null : v;
+}
+
+function cacheSetStr(key, value) {
+  cacheSet(key, value, 86400);
+}
+
 function findSlug(title) {
   const key = 'slug:' + title.toLowerCase();
-  const cached = cacheGet(key);
+  const cached = cacheGetStr(key);
   if (cached) return cached;
 
-  const searchUrl = 'https://ver2.animeonline.ninja/?s=' + encodeURIComponent(title);
-  const res = http({
+  const searchUrl = 'https://jkanime.net/directorio?q=' + encodeURIComponent(title);
+  const res = browserFetch('https://jkanime.net', {
     method: 'GET',
     url: searchUrl,
     headers: [['Accept', 'text/html']],
     body: undefined,
   });
-  if (!res || res.status !== 200) return null;
 
-  const html = bytesToString(res.body);
-  const needles = ['ww4.animeonline.ninja/online/', 'ver2.animeonline.ninja/online/'];
-  for (const needle of needles) {
-    let idx = 0;
-    while (true) {
-      const pos = html.indexOf(needle, idx);
-      if (pos === -1) break;
-      const abs = pos + needle.length;
-      let end = abs;
-      while (end < html.length && !['/', '"', "'", '<', ' ', '\n', '\r', '\t'].includes(html[end])) {
-        end++;
-      }
-      const slug = html.slice(abs, end);
-      if (slug && slug !== 'wp-content' && slug !== 'wp-includes') {
-        cacheSet(key, slug, 86400);
-        return slug;
-      }
-      idx = abs;
-    }
+  let html;
+  if (res && res.status === 200) {
+    html = bytesToString(res.body);
+  } else {
+    const res2 = http({
+      method: 'GET',
+      url: searchUrl,
+      headers: [['Accept', 'text/html']],
+      body: undefined,
+    });
+    if (!res2 || res2.status !== 200) return null;
+    html = bytesToString(res2.body);
   }
-  return null;
-}
 
-function findEpisodeUrl(html, episode) {
-  const bases = ['https://ww4.animeonline.ninja/episodio/', 'https://ver2.animeonline.ninja/episodio/'];
-  const needle = 'episodio/';
+  const needle = 'jkanime.net/';
   let idx = 0;
   while (true) {
     const pos = html.indexOf(needle, idx);
@@ -78,68 +61,30 @@ function findEpisodeUrl(html, episode) {
     while (end < html.length && !['/', '"', "'", '<', ' ', '\n', '\r', '\t'].includes(html[end])) {
       end++;
     }
-    const path = html.slice(abs, end);
-    const m = path.match(/^cap-(\d+)/);
-    if (m && Number(m[1]) === episode) {
-      for (const b of bases) {
-        if (html.indexOf(b, pos) !== -1) {
-          return b + path;
-        }
-      }
-      return bases[0] + path;
+    const slug = html.slice(abs, end);
+    if (slug && slug !== 'directorio' && slug !== '') {
+      cacheSetStr(key, slug);
+      return slug;
     }
     idx = abs;
   }
   return null;
 }
 
-function findIframeSrc(html) {
-  const re = /<iframe[^>]*src="([^"]+)"/;
-  const m = html.match(re);
-  if (m) {
-    return m[1].replace(/&amp;/g, '&');
+function extractStreamUrl(html) {
+  const m3u8Match = html.match(/https?:\/\/[^"'\s<]+\.m3u8[^"'\s<]*/);
+  if (m3u8Match) {
+    return m3u8Match[0].replace(/&amp;/g, '&');
   }
-  const re2 = /<iframe[^>]*src='([^']+)'/;
-  const m2 = html.match(re2);
-  if (m2) {
-    return m2[1];
-  }
-  const re3 = /iframe[^>]*src=["']([^"']+)["']/;
-  const m3 = html.match(re3);
-  if (m3) {
-    return m3[1];
-  }
-  return null;
-}
-
-function extractSourceGroups(html) {
-  const groups = {};
-  const groupRe = /<div class="OD (OD_[A-Z_]+)"[^>]*>([\s\S]*?)(?=<div class="OD |<\/body>)/g;
-  let m;
-  while ((m = groupRe.exec(html)) !== null) {
-    const lang = m[1];
-    const body = m[2];
-    const re = /go_to_player\('([^']+)'\)/g;
-    const urls = [];
-    let mm;
-    while ((mm = re.exec(body)) !== null) {
-      urls.push(mm[1]);
-    }
-    groups[lang] = urls;
-  }
-  return groups;
-}
-
-function deriveStreamUrl(sourceUrl) {
-  const m = sourceUrl.match(/^https?:\/\/([^/]+)\/data\/e\/([A-Za-z0-9]+)$/);
-  if (m) {
-    return 'https://' + m[1] + '/data/e/hls/' + m[2] + '/720p.m3u8';
+  const streamMatch = html.match(/https?:\/\/[^"'\s<]+playmudos[^"'\s<]*/);
+  if (streamMatch) {
+    return streamMatch[0].replace(/&amp;/g, '&');
   }
   return null;
 }
 
 export function servers(query) {
-  log('AnimeOnline lookup: ' + JSON.stringify(query.titles) + ' ep=' + query.episode + ' dub=' + query.dub);
+  log('JkAnime lookup: ' + JSON.stringify(query.titles) + ' ep=' + query.episode + ' dub=' + query.dub);
 
   let slug = null;
   for (const t of query.titles) {
@@ -147,73 +92,63 @@ export function servers(query) {
     if (slug) break;
   }
   if (!slug) {
-    throw new Error('AnimeOnline: no matching series found');
+    throw new Error('JkAnime: no matching series found');
   }
 
-  const seriesUrl = 'https://ver2.animeonline.ninja/online/' + slug + '/';
-  const seriesRes = http({
-    method: 'GET',
-    url: seriesUrl,
-    headers: [['Accept', 'text/html']],
-    body: undefined,
-  });
-  if (!seriesRes || seriesRes.status !== 200) {
-    throw new Error('AnimeOnline: HTTP ' + (seriesRes ? seriesRes.status : 'none') + ' for series page');
-  }
-  const seriesHtml = bytesToString(seriesRes.body);
-
-  const epUrl = findEpisodeUrl(seriesHtml, query.episode);
-  if (!epUrl) {
-    throw new Error('AnimeOnline: episode not found');
-  }
-
-  const epRes = http({
+  const epUrl = 'https://jkanime.net/' + slug + '/' + query.episode + '/';
+  const res = browserFetch('https://jkanime.net', {
     method: 'GET',
     url: epUrl,
     headers: [['Accept', 'text/html']],
     body: undefined,
   });
-  if (!epRes || epRes.status !== 200) {
-    throw new Error('AnimeOnline: HTTP ' + (epRes ? epRes.status : 'none') + ' for episode page');
-  }
-  const epHtml = bytesToString(epRes.body);
 
-  const iframeSrc = findIframeSrc(epHtml);
-  if (!iframeSrc) {
-    throw new Error('AnimeOnline: no player iframe found');
+  let html;
+  if (res && res.status === 200) {
+    html = bytesToString(res.body);
+  } else {
+    const res2 = http({
+      method: 'GET',
+      url: epUrl,
+      headers: [['Accept', 'text/html']],
+      body: undefined,
+    });
+    if (!res2 || res2.status !== 200) {
+      throw new Error('JkAnime: HTTP ' + (res2 ? res2.status : 'none') + ' for episode page');
+    }
+    html = bytesToString(res2.body);
   }
 
-  const embedRes = http({
+  const iframeMatch = html.match(/jkplayer\/um\?[^"'\s<]+/);
+  if (!iframeMatch) {
+    throw new Error('JkAnime: no jkplayer iframe found');
+  }
+  const iframeUrl = 'https://jkanime.net/' + iframeMatch[0].replace(/&amp;/g, '&');
+
+  const iframeRes = browserFetch('https://jkanime.net', {
     method: 'GET',
-    url: iframeSrc,
+    url: iframeUrl,
     headers: [['Accept', 'text/html']],
     body: undefined,
   });
-  if (!embedRes || embedRes.status !== 200) {
-    throw new Error('AnimeOnline: HTTP ' + (embedRes ? embedRes.status : 'none') + ' for player');
-  }
-  const embedHtml = bytesToString(embedRes.body);
 
-  const groups = extractSourceGroups(embedHtml);
-  const groupKey = query.dub ? 'OD_LAT' : 'OD_SUB';
-  const sources = groups[groupKey];
-  if (!sources || sources.length === 0) {
-    throw new Error('AnimeOnline: no sources for language group ' + groupKey);
+  let iframeHtml;
+  if (iframeRes && iframeRes.status === 200) {
+    iframeHtml = bytesToString(iframeRes.body);
+  } else {
+    throw new Error('JkAnime: iframe HTTP ' + (iframeRes ? iframeRes.status : 'none'));
   }
 
-  const sourceUrl = sources[0];
-  log('AnimeOnline source: ' + sourceUrl);
-
-  const streamUrl = deriveStreamUrl(sourceUrl);
+  const streamUrl = extractStreamUrl(iframeHtml);
   if (!streamUrl) {
-    throw new Error('AnimeOnline: unsupported source pattern');
+    throw new Error('JkAnime: no stream url found in iframe');
   }
 
   return [
     {
-      name: 'AnimeOnline',
+      name: 'JkAnime',
       dub: query.dub,
-      headers: [['Referer', 'https://gupload.site/']],
+      headers: [['Referer', 'https://jkanime.net/']],
       streams: [
         {
           url: streamUrl,
