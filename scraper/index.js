@@ -1,150 +1,153 @@
+import { http, log, cacheGet, cacheSet } from 'anilili:provider/host@1.0.0';
 
-import * as cheerio from "cheerio";
-import { URL } from "node:url";
-import readline from "node:readline/promises";
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout
-});
-
-function getDomain(url) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return null;
-  }
-}
-
-function isValidUrl(value, base) {
-  try {
-    const url = new URL(value, base);
-    return ["http:", "https:"].includes(url.protocol)
-      ? url.href
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function getServiceName(host) {
-  const known = {
-    "vidstream": "Vidstream",
-    "streamtape": "Streamtape",
-    "filemoon": "Filemoon",
-    "dood": "DoodStream",
-    "mp4upload": "MP4Upload"
-  };
-
-  const match = Object.entries(known).find(
-    ([key]) => host.toLowerCase().includes(key)
-  );
-
-  return match?.[1] ?? "Unknown player host";
-}
-
-async function inspect(url) {
-  const parsed = new URL(url);
-
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error("Only HTTP and HTTPS URLs are supported");
-  }
-
-  console.log("\nFetching webpage:", url);
-
-  
-const response = await fetch(url, {
-  headers: {
-    "User-Agent": "AnimeInspector/1.0",
-    "Accept": "text/html"
-  },
-  signal: AbortSignal.timeout(15000)
-});
-
-console.log("Status:", response.status);
-console.log("Final URL:", response.url);
-console.log("Content-Type:", response.headers.get("content-type"));
-console.log("Server:", response.headers.get("server"));
-
-if (response.status === 403) {
-  const body = await response.text();
-
+export function info() {
   return {
-    error: "ACCESS_DENIED",
-    status: 403,
-    finalUrl: response.url,
-    server: response.headers.get("server"),
-    responsePreview: body.slice(0, 500),
-    message: "The website refused this request."
+    name: 'VerAnime',
+    hosts: ['verani.me', 'player.zilla-networks.com'],
   };
 }
 
-if (!response.ok) {
-  throw new Error(`HTTP ${response.status}`);
+function bytesToString(bytes) {
+  return new TextDecoder().decode(new Uint8Array(bytes));
 }
 
-
-  const html = await response.text();
-  const $ = cheerio.load(html);
-
-  const embeds = new Map();
-
-  // Inspect publicly exposed player containers.
-  $("iframe[src], iframe[data-src], embed[src], object[data]")
-    .each((_, element) => {
-      const raw =
-        $(element).attr("src") ||
-        $(element).attr("data-src") ||
-        $(element).attr("data");
-
-      if (!raw) return;
-
-      const embedUrl = isValidUrl(raw, response.url);
-      if (!embedUrl) return;
-
-      const host = getDomain(embedUrl);
-      if (!host) return;
-
-      if (!embeds.has(host)) {
-        embeds.set(host, {
-          service: getServiceName(host),
-          domain: host,
-          embeds: []
-        });
-      }
-
-      embeds.get(host).embeds.push(embedUrl);
-    });
-
-  const result = {
-    page: url,
-    pageTitle: $("title").text().trim(),
-    hasVideoElement: $("video").length > 0,
-    playerHosts: [...embeds.values()]
-  };
-
-  return result;
+function stringToBytes(s) {
+  return Array.from(new TextEncoder().encode(s));
 }
 
-try {
-  const url = await rl.question("Anime episode URL: ");
+function findSlug(title) {
+  const key = 'slug:' + title.toLowerCase();
+  const cached = cacheGet(key);
+  if (cached) return cached;
 
-  const result = await inspect(url);
+  const searchUrl = 'https://verani.me/?s=' + encodeURIComponent(title);
+  const res = http({
+    method: 'GET',
+    url: searchUrl,
+    headers: [['Accept', 'text/html']],
+    body: undefined,
+  });
+  if (!res || res.status !== 200) return null;
 
-  console.log("\n========== RESULTS ==========\n");
-  console.log(JSON.stringify(result, null, 2));
+  const html = bytesToString(res.body);
+  const needle = 'verani.me/';
+  let idx = 0;
+  while (true) {
+    const pos = html.indexOf(needle, idx);
+    if (pos === -1) break;
+    const abs = pos + needle.length;
+    let end = abs;
+    while (end < html.length && !['/', '"', "'", '<', ' ', '\n', '\r', '\t', '?'].includes(html[end])) {
+      end++;
+    }
+    const slug = html.slice(abs, end);
+    if (slug && slug !== 'wp-content' && slug !== 'wp-includes') {
+      // validate by checking series page exists
+      cacheSet(key, slug, 86400);
+      return slug;
+    }
+    idx = abs;
+  }
+  return null;
+}
 
-  console.log("\n========== PLAYER HOSTS ==========\n");
+function findEpisodeUrl(html, slug, episode) {
+  const needle = 'verani.me/' + slug + '/';
+  let idx = 0;
+  while (true) {
+    const pos = html.indexOf(needle, idx);
+    if (pos === -1) break;
+    const abs = pos + needle.length;
+    let end = abs;
+    while (end < html.length && !['"', "'", '<', ' ', '\n', '\r', '\t'].includes(html[end])) {
+      end++;
+    }
+    const path = html.slice(abs, end);
+    const m = path.match(/^(\d+(?:\.\d+)?)-/);
+    if (m && Number(m[1]) === episode) {
+      return 'https://verani.me/' + slug + '/' + path;
+    }
+    idx = abs;
+  }
+  return null;
+}
 
-  for (const player of result.playerHosts) {
-    console.log("Service:", player.service);
-    console.log("Domain:", player.domain);
-    console.log("Embeds:", player.embeds.length);
-    console.log("-----------------------------");
+function extractZillaUrls(html) {
+  const seen = new Set();
+  const out = [];
+  const re = /player\.zilla-networks\.com\/m3u8\/[A-Za-z0-9]+/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const u = m[0];
+    if (!seen.has(u)) {
+      seen.add(u);
+      out.push('https://' + u);
+    }
+  }
+  return out;
+}
+
+export function servers(query) {
+  log('VerAnime lookup: ' + JSON.stringify(query.titles) + ' ep=' + query.episode + ' dub=' + query.dub);
+
+  let slug = null;
+  for (const t of query.titles) {
+    slug = findSlug(t);
+    if (slug) break;
+  }
+  if (!slug) {
+    throw new Error('VerAnime: no matching series found');
   }
 
-} catch (error) {
-  console.error("Inspector error:", error.message);
-} finally {
-  rl.close();
+  const seriesUrl = 'https://verani.me/' + slug + '/';
+  const seriesRes = http({
+    method: 'GET',
+    url: seriesUrl,
+    headers: [['Accept', 'text/html']],
+    body: undefined,
+  });
+  if (!seriesRes || seriesRes.status !== 200) {
+    throw new Error('VerAnime: HTTP ' + (seriesRes ? seriesRes.status : 'none') + ' for series page');
+  }
+  const seriesHtml = bytesToString(seriesRes.body);
+
+  const epUrl = findEpisodeUrl(seriesHtml, slug, query.episode);
+  if (!epUrl) {
+    throw new Error('VerAnime: episode not found');
+  }
+  log('VerAnime episode url: ' + epUrl);
+
+  const epRes = http({
+    method: 'GET',
+    url: epUrl,
+    headers: [['Accept', 'text/html']],
+    body: undefined,
+  });
+  if (!epRes || epRes.status !== 200) {
+    throw new Error('VerAnime: HTTP ' + (epRes ? epRes.status : 'none') + ' for episode page');
+  }
+  const epHtml = bytesToString(epRes.body);
+
+  const zillaUrls = extractZillaUrls(epHtml);
+  if (zillaUrls.length === 0) {
+    throw new Error('VerAnime: no stream found');
+  }
+
+  const idx = query.dub ? 0 : (zillaUrls.length > 1 ? 1 : 0);
+  const streamUrl = zillaUrls[idx];
+
+  return [
+    {
+      name: 'VerAnime',
+      dub: query.dub,
+      headers: [['Referer', 'https://player.zilla-networks.com/']],
+      streams: [
+        {
+          url: streamUrl,
+          quality: undefined,
+          format: 'hls',
+        },
+      ],
+    },
+  ];
 }
